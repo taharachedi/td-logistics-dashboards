@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CO2 dashboard — Sustainability</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="js/france-map-background.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  nav a { margin-right: 1rem; }
+  .kpis { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
+  .kpi { flex: 1; min-width: 160px; padding: 0.8rem 1rem; border: 1px solid #ccc; border-radius: 8px; }
+  .kpi .value { font-size: 1.5rem; font-weight: bold; color: #2e8b46; }
+  .kpi .label { font-size: 0.8rem; color: #666; }
+  #assumptions { font-size: 0.8rem; color: #666; padding: 0.6rem 0.9rem; border-left: 3px solid #2e8b46; margin: 1rem 0; }
+  canvas { margin-top: 1.5rem; }
+  .mine { margin-top: 2.5rem; padding-top: 1rem; border-top: 2px dashed #2e8b46; }
+</style>
+</head>
+<body>
+  <nav><a href="index.html">Overview</a> | <strong>CO2 (sustainability)</strong> | <a href="cost.html">Cost (operations)</a> | <a href="network.html">Network (strategy)</a></nav>
+  <h1>Which routes should we prioritize to cut network CO2?</h1>
+  <p>For: sustainability/CSR manager. Decision this supports: which specific delivery routes are the best candidates for consolidation or a shift to rail, and which warehouse is the least CO2-efficient per tonne delivered.</p>
+  <div class="kpis" id="kpis">Loading...</div>
+  <div id="assumptions"></div>
+
+  <h2>Highest-CO2 routes (ranking → bar chart)</h2>
+  <p>A ranked list of specific, actionable routes is exactly what a bar chart is for — each bar is one route someone could actually change.</p>
+  <canvas id="topLinksChart" height="280"></canvas>
+
+  <h2>Where emissions concentrate (spatial → scatter over a real France outline)</h2>
+  <p>This decision is inherently about geography — which <em>region</em> to target for consolidation — so we plot each city at its real coordinates, colored by its CO2 contribution, over a real (simplified) outline of France. Existing warehouses get their own marker <em>shape</em> (a triangle), not just a color — a shape difference survives grayscale printing and color-blindness in a way color alone doesn't.</p>
+  <canvas id="mapChart" height="360"></canvas>
+
+  <div class="mine">
+    <h2>My addition: which warehouse is least CO2-efficient per tonne? (bar of kg CO2/tonne)</h2>
+    <p>The page's own decision statement asks which warehouse is the least CO2-efficient per tonne delivered, but neither chart above answers it: the ranking shows routes, not warehouses, and the map shows totals, which mix "far" with "big". This chart divides CO2 by tonnes delivered, so a warehouse serving many tonnes is not penalised just for its size. A bar chart (not a pie) because the values are rates, not shares of a whole — a pie of kg/tonne would mean nothing. The dashed line is the network average, so "worse than average" reads at a glance.</p>
+    <canvas id="intensityChart" height="200"></canvas>
+  </div>
+
+<script>
+fetch('data/co2.json?t=' + Date.now())
+  .then(r => r.json())
+  .then(data => {
+    document.getElementById('kpis').innerHTML = `
+      <div class="kpi"><div class="value">${(data.total_co2_kg / 1000).toFixed(0)} t</div><div class="label">Total network CO2 / year</div></div>
+      <div class="kpi"><div class="value">${data.co2_kg_per_tonne_network_avg}</div><div class="label">kg CO2 per tonne delivered (network avg)</div></div>
+    `;
+    document.getElementById('assumptions').innerHTML =
+      `Assumptions: ${data.assumptions.co2_factor_kg_per_tonne_km} kg CO2e/tonne-km (illustrative, within the commonly-cited range for road freight — verify against ADEME's current Base Empreinte figure), ` +
+      `demand estimated at ${data.assumptions.tonnes_per_1000_residents_per_year} tonnes/year per 1,000 residents (a proxy, not measured shipment data).`;
+
+    const top = data.top_links || [];
+    new Chart(document.getElementById('topLinksChart'), {
+      type: 'bar',
+      data: { labels: top.map(l => `${l.city} <- ${l.warehouse}`), datasets: [{ label: 'CO2 (kg/year)', data: top.map(l => l.co2_kg), backgroundColor: '#2e8b46' }] },
+      options: { indexAxis: 'y', plugins: { legend: { display: false }, title: { display: true, text: 'Top 10 highest-CO2 routes' } } },
+    });
+
+    const cities = data.all_cities || [];
+    const maxCo2 = Math.max(...cities.map(c => c.co2_kg), 1);
+    const warehouses = cities.filter(c => c.is_warehouse);
+    const served = cities.filter(c => !c.is_warehouse);
+    new Chart(document.getElementById('mapChart'), {
+      type: 'scatter',
+      data: {
+        datasets: [
+          {
+            label: 'Existing warehouse',
+            data: warehouses.map(c => ({ x: c.lon, y: c.lat, co2: c.co2_kg, city: c.city, warehouse: c.warehouse })),
+            backgroundColor: '#1a1a2e',
+            pointStyle: 'triangle',
+            pointRadius: 10,
+            pointBorderColor: '#fff',
+            pointBorderWidth: 1,
+          },
+          {
+            label: 'City (size/color = CO2 contribution)',
+            data: served.map(c => ({ x: c.lon, y: c.lat, co2: c.co2_kg, city: c.city, warehouse: c.warehouse })),
+            backgroundColor: served.map(c => `hsl(${Math.max(0, 120 - 120 * (c.co2_kg / maxCo2))}, 70%, 45%)`),
+            pointStyle: 'circle',
+            pointRadius: served.map(c => 4 + 12 * Math.sqrt(c.co2_kg / maxCo2)),
+          },
+        ],
+      },
+      plugins: [franceBackgroundPlugin],
+      options: {
+        plugins: {
+          legend: { position: 'bottom' },
+          title: { display: true, text: 'Real coordinates over a real France outline — triangle = existing warehouse, bigger/redder circle = more CO2' },
+          tooltip: { callbacks: { label: (item) => {
+            const c = item.raw;
+            return item.datasetIndex === 0
+              ? [`${c.city} (existing warehouse)`]
+              : [`${c.city} -> ${c.warehouse}`, `${c.co2.toFixed(0)} kg CO2/year`];
+          } } },
+        },
+        scales: {
+          x: { title: { display: true, text: 'Longitude' }, min: FRANCE_BBOX.minLon, max: FRANCE_BBOX.maxLon },
+          y: { title: { display: true, text: 'Latitude' }, min: FRANCE_BBOX.minLat, max: FRANCE_BBOX.maxLat },
+        },
+      },
+    });
+
+    // My addition (Step 15): CO2 intensity per warehouse vs network average.
+    const byWh = (data.by_warehouse || []).slice().sort((a, b) => b.co2_kg_per_tonne - a.co2_kg_per_tonne);
+    const avg = data.co2_kg_per_tonne_network_avg;
+    new Chart(document.getElementById('intensityChart'), {
+      type: 'bar',
+      data: {
+        labels: byWh.map(w => w.warehouse),
+        datasets: [
+          { type: 'bar', label: 'kg CO2 per tonne delivered', data: byWh.map(w => w.co2_kg_per_tonne),
+            backgroundColor: byWh.map(w => w.co2_kg_per_tonne > avg ? '#c0392b' : '#2e8b46') },
+          { type: 'line', label: `Network average (${avg} kg/tonne)`, data: byWh.map(() => avg),
+            borderColor: '#555', borderDash: [6, 4], pointRadius: 0, fill: false },
+        ],
+      },
+      options: {
+        indexAxis: 'x',
+        plugins: { title: { display: true, text: 'CO2 intensity per warehouse — red = worse than network average' } },
+        scales: { y: { beginAtZero: true, title: { display: true, text: 'kg CO2 / tonne' } } },
+      },
+    });
+  })
+  .catch(err => { document.getElementById('kpis').innerHTML = '<p>Could not load data (' + err + ').</p>'; });
+</script>
+</body>
+</html>
